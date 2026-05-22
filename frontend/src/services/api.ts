@@ -123,6 +123,8 @@ export const notificationsApi = {
     api.get(`/notifications?unread_only=${unreadOnly}`).then((r) => r.data),
   markRead: (ids: number[]) =>
     api.post('/notifications/read', { ids }),
+  delete: (id: number) =>
+    api.delete(`/notifications/${id}`),
 }
 
 

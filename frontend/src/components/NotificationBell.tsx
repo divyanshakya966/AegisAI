@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Bell, Clock, X } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { notificationsApi } from '../services/api'
-
-// TODO: Wire to GET /api/v1/notifications via useQuery (Issue #113)
+import { notify } from '../utils/toast'
 
 interface NotificationPreview {
   id: number
@@ -12,7 +11,8 @@ interface NotificationPreview {
   message: string
   is_read: boolean
   created_at: string               // ISO‑8601 date string
-  type: 'alert' | 'update' | 'ai' | 'news'
+  type?: 'alert' | 'update' | 'ai' | 'news'
+  notification_type?: string
 }
 
 
@@ -37,6 +37,7 @@ function typeColor(type: NotificationPreview['type']): string {
     case 'update': return 'bg-green-500'
     case 'ai':     return 'bg-purple-500'
     case 'news':   return 'bg-primary-500'
+    default:       return 'bg-primary-500'
   }
 }
 
@@ -44,12 +45,14 @@ function typeColor(type: NotificationPreview['type']): string {
 
 export default function NotificationBell() {
   const [isOpen, setIsOpen] = useState(false)
+  const [pendingReadIds, setPendingReadIds] = useState<Set<number>>(new Set())
+  const navigate = useNavigate()
 
   const wrapperRef = useRef<HTMLDivElement>(null)
 
   // Live data via useQuery
   const queryClient = useQueryClient()
-  const { data: notifications = [] } = useQuery({
+  const { data: notifications = [], isLoading } = useQuery({
     queryKey: ['notifications', 'unread'],
     queryFn: () => notificationsApi.list(true),
     refetchInterval: 60_000,
@@ -58,8 +61,60 @@ export default function NotificationBell() {
   const unreadCount = notifications.filter((n: NotificationPreview) => !n.is_read).length
 
   const handleNotificationClick = async (id: number) => {
-    await notificationsApi.markRead([id])
-    queryClient.invalidateQueries({ queryKey: ['notifications', 'unread'] })
+    if (pendingReadIds.has(id)) {
+      return
+    }
+
+    setPendingReadIds((current) => {
+      const next = new Set(current)
+      next.add(id)
+      return next
+    })
+
+    await queryClient.cancelQueries({ queryKey: ['notifications', 'unread'] })
+
+    const previousUnreadNotifications = queryClient.getQueryData<NotificationPreview[]>([
+      'notifications',
+      'unread',
+    ])
+
+    queryClient.setQueryData<NotificationPreview[]>(['notifications', 'unread'], (current = []) =>
+      current.filter((notification) => notification.id !== id),
+    )
+
+    try {
+      await notificationsApi.markRead([id])
+      await queryClient.invalidateQueries({ queryKey: ['notifications'] })
+      await queryClient.invalidateQueries({ queryKey: ['notifications', 'unread'] })
+    } catch {
+      queryClient.setQueryData(['notifications', 'unread'], previousUnreadNotifications)
+      notify.error('Unable to update notification right now.')
+    } finally {
+      setPendingReadIds((current) => {
+        const next = new Set(current)
+        next.delete(id)
+        return next
+      })
+      setIsOpen(false)
+      navigate('/notifications')
+    }
+  }
+
+  const getNotificationType = (notification: NotificationPreview): NotificationPreview['type'] => {
+    if (notification.type) {
+      return notification.type
+    }
+
+    switch ((notification.notification_type || '').toLowerCase()) {
+      case 'guard_block':
+        return 'alert'
+      case 'document_generated':
+        return 'update'
+      case 'system_classified':
+        return 'ai'
+      default:
+        return 'news'
+    }
   }
 
   // Close dropdown on click outside
@@ -155,10 +210,14 @@ export default function NotificationBell() {
 
 
         <div className="max-h-80 overflow-y-auto divide-y divide-gray-50">
-          {notifications.length === 0 ? (
+          {isLoading ? (
+            <div className="px-4 py-8 text-center">
+              <p className="text-sm text-gray-500">Loading notifications...</p>
+            </div>
+          ) : notifications.length === 0 ? (
             <div className="px-4 py-8 text-center">
               <Bell className="w-10 h-10 mx-auto mb-2 text-gray-200" />
-              <p className="text-sm text-gray-400">No notifications yet</p>
+              <p className="text-sm text-gray-400">You are all caught up</p>
             </div>
           ) : (
             notifications.slice(0, 5).map((notification: NotificationPreview) => (
@@ -166,15 +225,17 @@ export default function NotificationBell() {
                 key={notification.id}
                 type="button"
                 onClick={() => handleNotificationClick(notification.id)}
+                disabled={pendingReadIds.has(notification.id)}
                 className={`w-full flex items-start gap-3 px-4 py-3 text-left transition-colors hover:bg-gray-50 focus:outline-none focus:bg-gray-50 ${
                   !notification.is_read ? 'bg-primary-50/40' : ''
                 }`}
                 role="menuitem"
+                aria-busy={pendingReadIds.has(notification.id)}
               >
 
                 <div
                   className={`w-1 self-stretch rounded-full flex-shrink-0 ${typeColor(
-                    notification.type,
+                    getNotificationType(notification),
                   )}`}
                 />
 
